@@ -1,0 +1,73 @@
+name: drone-demo
+
+# 全容器链路：
+#   Windows FFmpeg ──RTMP──▶ drone1 ──┐
+#   frontend(nginx :8080) ──/api──▶ backend
+#   backend ──Docker socket──▶ worker 容器 ──▶ drone1_yolo
+#   浏览器 ──WebRTC :8889──▶ MediaMTX
+#
+# 推流端模拟真实设备：在 Windows 上独立运行，不由平台启动。
+# Windows 侧执行：
+#   powershell -ExecutionPolicy Bypass -File scripts\push-windows.ps1
+#
+# 所有服务都用 host 网络：MediaMTX 需要它来避免 WSL2 下 WebRTC/UDP 的
+# NAT 问题，其余服务用 127.0.0.1 互访也最简单。
+#
+# 浏览器播放页：
+#   http://localhost:8080          控制台
+#   http://localhost:8889/drone1   原画
+#   http://localhost:8889/drone1_yolo 检测画
+
+services:
+  mediamtx:
+    # 如 1.21.3 拉取失败，可改用 bluenviron/mediamtx:1
+    image: bluenviron/mediamtx:1.21.3
+    container_name: drone-mediamtx
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./deploy/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
+  backend:
+    build:
+      context: ./backend
+      network: host
+    image: drone-backend:dev
+    container_name: drone-backend
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    volumes:
+      # 允许后端启停 drone-worker；仅限本机演示，注意权限。
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      MEDIAMTX_API: http://127.0.0.1:9997
+      WORKER_CONTAINER: drone-worker
+
+  frontend:
+    build:
+      context: ./frontend
+      network: host
+    image: drone-frontend:dev
+    container_name: drone-frontend
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  worker:
+    build:
+      context: ./worker
+      # 构建阶段要访问 PyPI 镜像，走 host 网络更稳
+      network: host
+    image: drone-worker:dev
+    container_name: drone-worker
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    environment:
+      DRONE_SOURCE: rtsp://127.0.0.1:8554/drone1
+      DRONE_DEST: rtmp://127.0.0.1:1935/drone1_yolo
+    command: ["relay"]
